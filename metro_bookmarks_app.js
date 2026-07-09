@@ -1,4 +1,4 @@
-let allBookmarks = window.METRO_BOOKMARKS || [];
+let allBookmarks = [];
 const palette = [
   '#4f7f78', '#8b6f4d', '#6f6b8f', '#7b5963', '#55728a', '#7b7448',
   '#6d5a7d', '#4f745f', '#7c5b52', '#526f7f', '#765d6b', '#576f91'
@@ -9,14 +9,11 @@ const state = {
   density: 'normal'
 };
 
-let baseBookmarks = [];
-let bookmarks = [];
 let byCategory = new Map();
 let categoryNames = [];
 let categoryColor = new Map();
 let isWritingChrome = false;
 let activeDraggedBookmarkId = '';
-const SHORT_TITLE_MIGRATION_KEY = 'metro:short-title-migration:v1';
 
 const meta = document.getElementById('meta');
 const nav = document.getElementById('categoryNav');
@@ -63,16 +60,6 @@ function chromeBookmarkUpdate(id, changes) {
   });
 }
 
-function chromeBookmarkRemoveTree(id) {
-  return new Promise((resolve, reject) => {
-    chrome.bookmarks.removeTree(id, () => {
-      const error = chrome.runtime && chrome.runtime.lastError;
-      if (error) reject(new Error(error.message));
-      else resolve();
-    });
-  });
-}
-
 function chromeBookmarkTree() {
   return new Promise((resolve, reject) => {
     chrome.bookmarks.getTree(tree => {
@@ -110,11 +97,7 @@ function flattenChromeBookmarks(nodes) {
         title: node.title || node.url,
         url: node.url,
         category,
-        parentId: node.parentId,
-        index: node.index,
-        domain,
-        addDate: node.dateAdded ? Math.floor(node.dateAdded / 1000) : null,
-        status: 'ok'
+        domain
       });
       return;
     }
@@ -141,8 +124,6 @@ async function syncFromChromeBookmarks(options = {}) {
       state.category = 'All Bookmarks';
     }
     render();
-    flattenNestedBookmarkFolders(bookmarksBar);
-    updateTitlesToShortNamesOnce();
   } catch (error) {
     if (!silent) alert(`Could not sync Chrome bookmarks.\n\n${error && error.message ? error.message : error}`);
     renderGroups();
@@ -177,42 +158,6 @@ function chromeBookmarkRemove(id) {
 
 function findFolderChild(parent, title) {
   return (parent.children || []).find(node => !node.url && node.title === title);
-}
-
-function descendantBookmarks(node) {
-  const items = [];
-  function visit(current) {
-    if (current.url) {
-      items.push(current);
-      return;
-    }
-    for (const child of current.children || []) visit(child);
-  }
-  visit(node);
-  return items;
-}
-
-async function flattenNestedBookmarkFolders(bookmarksBar) {
-  if (!hasChromeBookmarksApi() || isWritingChrome || !bookmarksBar) return;
-  const topFolders = (bookmarksBar.children || []).filter(node => !node.url);
-  const nestedFolders = topFolders.flatMap(folder => (folder.children || [])
-    .filter(child => !child.url)
-    .map(child => ({ parent: folder, folder: child })));
-  if (!nestedFolders.length) return;
-  isWritingChrome = true;
-  try {
-    for (const entry of nestedFolders) {
-      for (const bookmark of descendantBookmarks(entry.folder)) {
-        await chromeBookmarkMove(bookmark.id, { parentId: entry.parent.id });
-      }
-      await chromeBookmarkRemoveTree(entry.folder.id);
-    }
-  } catch (error) {
-    alert(`Could not flatten bookmark folders.\n\n${error && error.message ? error.message : error}`);
-  } finally {
-    isWritingChrome = false;
-    syncFromChromeBookmarks({ silent: true });
-  }
 }
 
 async function moveChromeBookmarkTo(item, category) {
@@ -302,16 +247,14 @@ async function renameChromeBookmark(item, title) {
 }
 
 function rebuildIndexes() {
-  baseBookmarks = allBookmarks;
-  bookmarks = baseBookmarks;
   byCategory = new Map();
-  for (const item of bookmarks) {
+  for (const item of allBookmarks) {
     if (!byCategory.has(item.category)) byCategory.set(item.category, []);
     byCategory.get(item.category).push(item);
   }
   categoryNames = ['All Bookmarks', ...byCategory.keys()];
   categoryColor = new Map(categoryNames.map((name, index) => [name, palette[index % palette.length]]));
-  meta.textContent = `${baseBookmarks.length} links`;
+  meta.textContent = `${allBookmarks.length} links`;
 }
 
 function initials(item) {
@@ -323,59 +266,13 @@ function shortTitle(item) {
   return String(item.title || item.domain || item.url || initials(item)).trim();
 }
 
-function compactTitle(item) {
-  const domainName = (item.domain || '')
-    .replace(/\.(com|org|net|io|ai|dev|app|edu|gov)$/i, '')
-    .split('.')[0];
-  const raw = item.title && item.title !== item.url ? item.title : domainName || item.url;
-  const cleaned = String(raw || '')
-    .replace(/^https?:\/\//i, '')
-    .replace(/^www\./i, '')
-    .replace(/\s*[-|–—:]\s*.*/, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  const words = cleaned.split(' ').filter(Boolean);
-  if (words.length > 1) return words.slice(0, 3).join(' ');
-  return cleaned.slice(0, 14) || initials(item);
-}
-
-async function updateTitlesToShortNamesOnce() {
-  if (!hasChromeBookmarksApi() || isWritingChrome || !allBookmarks.length) return;
-  if (localStorage.getItem(SHORT_TITLE_MIGRATION_KEY) === 'done') return;
-  isWritingChrome = true;
-  let changed = false;
-  try {
-    for (const item of allBookmarks) {
-      if (!item.id) continue;
-      const nextTitle = compactTitle(item);
-      if (!nextTitle || nextTitle === item.title) continue;
-      await chromeBookmarkUpdate(item.id, { title: nextTitle });
-      changed = true;
-    }
-    localStorage.setItem(SHORT_TITLE_MIGRATION_KEY, 'done');
-  } catch (error) {
-    alert(`Could not update bookmark titles.\n\n${error && error.message ? error.message : error}`);
-  } finally {
-    isWritingChrome = false;
-    if (changed) syncFromChromeBookmarks({ silent: true });
-  }
-}
-
-function faviconUrl(item) {
-  return faviconUrls(item)[0] || '';
-}
-
 function faviconUrls(item) {
   try {
     const url = new URL(item.url);
-    const fallback = `https://www.google.com/s2/favicons?domain_url=${encodeURIComponent(url.href)}&sz=128`;
     if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.getURL === 'function') {
-      return [
-        chrome.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent(url.href)}&size=128`),
-        fallback
-      ];
+      return [chrome.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent(url.href)}&size=128`)];
     }
-    return [fallback];
+    return [];
   } catch {
     return [];
   }
@@ -441,11 +338,6 @@ function beginTitleEdit(item, title, titleText, tile) {
 
   titleText.addEventListener('blur', () => finish(true), { once: true });
   titleText.addEventListener('keydown', onKeyDown);
-}
-
-function scoreSize(item) {
-  void item;
-  return '';
 }
 
 function matches(item) {
@@ -523,12 +415,12 @@ function makeTileSortTarget(tile, item) {
 }
 
 function filteredItems() {
-  return bookmarks.filter(matches);
+  return allBookmarks.filter(matches);
 }
 
 function renderNav() {
   nav.innerHTML = '';
-  const visibleBookmarks = bookmarks;
+  const visibleBookmarks = allBookmarks;
   for (const name of categoryNames) {
     const count = name === 'All Bookmarks'
       ? visibleBookmarks.length
@@ -559,13 +451,12 @@ function renderNav() {
 function renderGroups() {
   const items = filteredItems();
 
-  const densityVars = {
-    compact: ['72px', '72px'],
-    normal: ['86px', '86px'],
-    roomy: ['102px', '102px']
+  const tileSize = {
+    compact: '72px',
+    normal: '86px',
+    roomy: '102px'
   }[state.density];
-  document.documentElement.style.setProperty('--tile-min', densityVars[0]);
-  document.documentElement.style.setProperty('--tile-row', densityVars[1]);
+  document.documentElement.style.setProperty('--tile-min', tileSize);
 
   if (!items.length) {
     groups.innerHTML = '<div class="empty">No matching bookmarks.</div>';
@@ -592,10 +483,9 @@ function renderGroups() {
 
     for (const item of entries) {
       const tile = document.createElement('div');
-      tile.className = `tile ${scoreSize(item)} ${item.status !== 'ok' ? item.status : ''}`.trim();
+      tile.className = 'tile';
       tile.draggable = true;
       tile.title = `${item.title}\n${item.url}`;
-      tile.dataset.statusLabel = item.status === 'broken' ? 'broken' : item.status === 'maybe' ? 'check' : '';
       tile.style.setProperty('--accent', categoryColor.get(item.category) || '#00a99d');
       tile.addEventListener('dragstart', event => {
         activeDraggedBookmarkId = String(item.id);
@@ -615,10 +505,6 @@ function renderGroups() {
       link.href = item.url;
       link.target = '_blank';
       link.rel = 'noreferrer';
-      const body = document.createElement('div');
-      const domain = document.createElement('div');
-      domain.className = 'domain';
-      domain.textContent = item.domain || item.category;
       const initial = document.createElement('div');
       initial.className = 'initial';
       const title = document.createElement('div');
@@ -659,8 +545,7 @@ function renderGroups() {
       }
       initial.append(icon, title);
       prepareSlidingTitle(title);
-      body.append(domain);
-      link.append(body, initial);
+      link.append(initial);
       const deleteButton = document.createElement('button');
       deleteButton.className = 'delete-tile';
       deleteButton.type = 'button';

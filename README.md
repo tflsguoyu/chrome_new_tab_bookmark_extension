@@ -8,3 +8,4 @@
 After that, Chrome's new tab page will show bookmarks from the Chrome Bookmark Bar.
 
 Bookmark data stays in Chrome and is not included in this repository.
+The extension writes to Chrome bookmarks only when you rename, move, reorder, or delete a bookmark.
